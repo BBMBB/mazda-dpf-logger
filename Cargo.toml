@@ -1,0 +1,17 @@
+[package]
+name = "mazda-dpf-logger"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Read-only serial OBD logger for the Mazda CX-5 2.2 SKYACTIV-D"
+
+[features]
+default = []
+pi-leds = ["dep:rppal"]
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+csv = "1.3"
+ctrlc = "3.4"
+serialport = { version = "4.7", default-features = false }
+rppal = { version = "0.22", optional = true }
