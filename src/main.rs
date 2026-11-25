@@ -16,7 +16,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 // Target time between sweep starts. Queries are sequential; slow sweeps may overrun.
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const DEFAULT_BAUD: u32 = 115200;
 
 struct Options {
@@ -71,6 +71,46 @@ fn new_log(path: &std::path::Path) -> io::Result<File> {
     OpenOptions::new().write(true).create_new(true).open(path)
 }
 
+#[cfg(not(feature = "rtc"))]
+fn new_trip_log(directory: &std::path::Path) -> io::Result<(PathBuf, File)> {
+    let mut highest = 0_u64;
+    for entry in fs::read_dir(directory)? {
+        let name = entry?.file_name();
+        let Some(name) = name.to_str().and_then(|name| name.strip_prefix("trip_")) else {
+            continue;
+        };
+        // Reserve numbers from companion logs too, including an orphaned error log.
+        let Some(number) = name
+            .strip_suffix(".csv")
+            .or_else(|| name.strip_suffix(".errors.log"))
+        else {
+            continue;
+        };
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let number = number.parse::<u64>().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Existing trip number exceeds u64",
+            )
+        })?;
+        highest = highest.max(number);
+    }
+    loop {
+        highest = highest
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("Trip numbers exhausted"))?;
+        let path = directory.join(format!("trip_{highest:06}.csv"));
+        match new_log(&path) {
+            Ok(file) => return Ok((path, file)),
+            // Another logger may have reserved this number after the directory scan.
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn event(log: &mut File, pid: &str, message: &str, raw: &str) -> io::Result<()> {
     writeln!(log, "{} [{pid}] {message}; raw={raw:?}", timestamp())?;
     log.flush()
@@ -81,11 +121,19 @@ fn run(
     running: &AtomicBool,
     leds: &mut StatusLeds,
 ) -> Result<(), Box<dyn Error>> {
+    #[cfg(not(feature = "rtc"))]
+    let session_start = Instant::now();
     fs::create_dir_all(&options.output)?;
+    #[cfg(feature = "rtc")]
     let stem = Utc::now().format("drive_%Y%m%dT%H%M%S%.9fZ").to_string();
+    #[cfg(feature = "rtc")]
     let csv_path = options.output.join(format!("{stem}.csv"));
-    let mut csv = csv::Writer::from_writer(new_log(&csv_path)?);
-    let mut errors = new_log(&options.output.join(format!("{stem}.errors.log")))?;
+    #[cfg(feature = "rtc")]
+    let csv_file = new_log(&csv_path)?;
+    #[cfg(not(feature = "rtc"))]
+    let (csv_path, csv_file) = new_trip_log(&options.output)?;
+    let mut csv = csv::Writer::from_writer(csv_file);
+    let mut errors = new_log(&csv_path.with_extension("errors.log"))?;
     csv.write_record(["timestamp", "pid", "name", "raw_hex", "value", "unit"])?;
     csv.flush()?;
     println!("CSV: {}", csv_path.display());
@@ -148,7 +196,13 @@ fn run(
                 break;
             }
             let reply = adapter.query(pid.command, running);
+            #[cfg(feature = "rtc")]
             let time = timestamp();
+            #[cfg(not(feature = "rtc"))]
+            let time = {
+                let elapsed = session_start.elapsed();
+                format!("{}.{:03}", elapsed.as_secs(), elapsed.subsec_millis())
+            };
             let result = match reply.error {
                 Some(error) => Err(error),
                 None => protocol::payload(&reply.raw, pid.command)

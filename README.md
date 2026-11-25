@@ -32,20 +32,39 @@ host serial rate, which must match the adapter; the default is 115200.
 `--output` defaults to `logs` in the working directory. Use `--help` for CLI
 options and Ctrl+C to stop.
 
+The default build needs no accurate system clock: trip files are numbered and
+CSV timestamps are elapsed seconds. To keep UTC timestamps and dated filenames,
+build with `rtc` and set the system clock before starting:
+
+```sh
+cargo build --release --features rtc
+```
+
 ## Logs
 
-Each run creates `drive_<UTC timestamp>.csv` and a matching `.errors.log` without
-overwriting existing files. The error log records adapter initialization,
-failed queries, late responses and polling overruns. Query failures do not stop
-logging; port setup and file errors do.
+By default, each run creates `trip_000001.csv`, `trip_000002.csv`, and so on.
+The next number is one higher than the largest existing trip number in the
+output directory, including companion error logs. Keep those files to retain
+the sequence across restarts. With `rtc`, filenames remain
+`drive_<UTC timestamp>.csv`. Neither mode overwrites existing files.
+
+Each CSV has a matching `.errors.log`. The error log records adapter
+initialization, failed queries, late responses and polling overruns. Query
+failures do not stop logging; port setup and file errors do.
 
 ```text
 timestamp,pid,name,raw_hex,value,unit
 ```
 
-Each CSV record contains one measurement, timestamped at response completion in
-UTC (RFC 3339). `raw_hex` keeps the original adapter response, including CAN
-headers, padding, whitespace, line breaks, any echo and the `>` prompt. Partial
+Each CSV record contains one measurement, timestamped at response completion.
+Without `rtc`, `timestamp` is elapsed seconds with three decimal places, such as
+`12.345`, measured by monotonic `Instant` from session startup, including adapter
+initialization. It is independent of the system clock. With `rtc`, it remains
+UTC (RFC 3339, milliseconds). Error log entries retain their system-clock UTC
+timestamps in both modes.
+
+`raw_hex` keeps the original adapter response, including CAN headers, padding,
+whitespace, line breaks, any echo and the `>` prompt. Partial
 responses are kept too. Use a CSV reader: a record can span several lines.
 Unexpected non-ASCII bytes are stored as their Latin-1 code points in UTF-8,
 so their original byte values can be recovered.
@@ -64,14 +83,14 @@ do not commit vehicle identifiers.
 
 Configuration is in the source:
 
-- `src/main.rs`: `POLL_INTERVAL`, five seconds between polling round starts.
+- `src/main.rs`: `POLL_INTERVAL`, ten seconds between polling round starts.
 - `src/pids.rs`: PIDs, names, units, minimum data lengths and formulas.
 - `src/adapter.rs`: initialization and response timeout (two seconds).
 
 Every configured PID is queried sequentially, including those returning
-`NO DATA`. If a round exceeds five seconds, the overrun is logged and the next
-round starts immediately. There are no catch-up bursts. Serial reads time out
-after 100 ms so Ctrl+C can interrupt a pending response.
+`NO DATA`. If a round exceeds the configured interval, the overrun is logged
+and the next round starts immediately. There are no catch-up bursts. Serial
+reads time out after 100 ms so Ctrl+C can interrupt a pending response.
 
 CAN is fixed to ISO 15765-4, 11-bit / 500 kbit/s (`ATSP6`), with requests to
 `7E0` and responses from `7E8`. Headers and spaces are on, DLC display is off.
@@ -86,6 +105,8 @@ For GPIO status LEDs, build on the Pi with `pi-leds`:
 cargo build --release --features pi-leds
 ./target/release/mazda-dpf-logger /dev/ttyUSB0 --output /mnt/obd-data --leds
 ```
+
+Use `--features pi-leds,rtc` to include both LED support and UTC timestamps.
 
 For a read-only root filesystem, build and install first, then mount the data
 partition read/write before starting the logger. All CSV and error log writes
